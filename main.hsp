@@ -1,0 +1,26 @@
+#cmpopt varinit 1
+
+#include "module/pe_parser.hsp"
+
+filepath = "C:\\Users\\Yudai Fujiwara\\Desktop\\development\\HSPÉAÉCÉRÉìèëÇ´ä∑Ç¶\\hsptmp.exe"
+;filepath = "C:\\install\\ResHacker\\hoge.exe"
+
+dim PE
+newmod PE, PE_Parser, filepath
+
+if open_pe(PE) != 0 {
+	mes "Invalid PE file"
+	stop
+}
+
+if load_section(PE, ".rsrc") != 0 {
+	mes ".rsrc not found."
+	stop
+}
+
+if rsrc_load_resource(PE, "RT_ICON") != 0 {
+	mes "RT_ICON not found."
+	stop
+}
+
+mes rsrc_load_icons(PE)

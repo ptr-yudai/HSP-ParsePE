@@ -1,0 +1,154 @@
+#module PE_Parser filepath, filesize, fp, byte,\
+                  dos, fh, oh, sh, section, idlist, iconlist\
+                  rsrcname
+	#addition "pe_parser.as"
+	
+	/*--------------------------------------------------
+		モジュール初期化
+	--------------------------------------------------*/
+	#modinit str _filepath_
+		// ファイル情報
+		filepath = _filepath_
+		fp = INVALID_HANDLE_VALUE
+		filesize = 0
+		// PE情報
+		sdim dos, IMAGE_DOS_HEADER
+		sdim fh, IMAGE_FILE_HEADER
+		sdim oh, IMAGE_OPTIONAL_HEADER
+		sdim sh, IMAGE_SECTION_HEADER
+		// rsrc(リソース)
+		sdim rsrcname, 64, 32
+		rsrcname(0)  = "?", "RT_CURSOR", "RT_BITMAP", "RT_ICON", "RT_MENU", "RT_DIALOG"
+		rsrcname(6)  = "RT_STRING", "RT_FONTDIR", "RT_FONT", "RT_ACCELERATOR", "RT_RCDATA"
+		rsrcname(11) = "RT_MESSAGETABLE", "RT_GROUP_CURSOR", "?", "RT_GROUP_ICON", "?"
+		rsrcname(16) = "RT_VERSION", "RT_DLGINCLUDE", "?","RT_PLUGPLAY", "RT_VXD"
+		rsrcname(21) = "RT_ANICURSOR", "RT_ANIICON", "RT_HTML", "RT_MANIFEST"
+	return
+	
+	/*--------------------------------------------------
+		.rsrcからリソースを取得
+	--------------------------------------------------*/
+	#modcfunc rsrc_load_resource str resource_cmp,\
+	                             local offset, local entry, local rd, local rde,\
+	                             local resource_cur, local target
+		offset = 0
+		target = -1
+		entry = 0
+		sdim rd, IMAGE_RESOURCE_DIRECTORY
+		sdim rde, IMAGE_RESOURCE_DIRECTORY_ENTRY
+		// RESOURCE_DIRECTORYを調べる
+		repeat
+			dupptr rd, varptr(section) + offset, IMAGE_RESOURCE_DIRECTORY, 2
+			offset += IMAGE_RESOURCE_DIRECTORY
+			entry = wpeek(rd, NumberOfNamedEntries) + wpeek(rd, NumberOfIdEntries)
+			dim idlist, entry
+			dim iconlist, entry
+			
+			// RESOURCE_DIRECTORY_ENTRYを調べる
+			repeat entry
+				dupptr rde, varptr(section) + offset, IMAGE_RESOURCE_DIRECTORY_ENTRY, 2
+				offset += IMAGE_RESOURCE_DIRECTORY_ENTRY
+				
+				if target == -1 {
+					// 名前を調べる
+					if lpeek(rde, Name_Id) & 0x80000000 {
+						resource_cur = ""
+					} else {
+						resource_cur = rsrcname(lpeek(rde, Name_Id) & 0xFFFF)
+					}
+					// 探索対象が見つかった
+					if resource_cur == resource_cmp {
+						target = cnt
+						break
+					}
+				} else {
+					// IDとオフセットをリストに追加
+					idlist(cnt) = lpeek(rde, Name_Id) & 0x7fffffff
+					// 次のエントリへジャンプ
+					dupptr rde, varptr(section) + (lpeek(rde, OffsetToData_Directory) & 0x7fffffff) + IMAGE_RESOURCE_DIRECTORY, IMAGE_RESOURCE_DIRECTORY_ENTRY, 2
+					iconlist(cnt) = lpeek(rde, OffsetToData_Directory) & 0x7fffffff
+				}
+			loop
+			// 探索対象が見つからなかった
+			if target == -1 : break
+			
+			// データがディレクトリである
+			if lpeek(rde, OffsetToData_Directory) & 0x80000000 {
+				offset = lpeek(rde, OffsetToData_Directory) & 0x7fffffff
+			} else {
+				break
+			}
+		loop
+		
+		// 探索対象が見つからなかった
+		if target == -1 : return -1
+		
+	return 0
+	
+	/*--------------------------------------------------
+		アイコンを取得
+	--------------------------------------------------*/
+	#modcfunc rsrc_load_icons local offset, local rde, local icondata
+		foreach idlist
+			dupptr rde, varptr(section) + iconlist(cnt), IMAGE_RESOURCE_DATA_ENTRY, 2
+			offset = lpeek(rde, OffsetToData) - lpeek(sh, VirtualAddress)
+			mes strf("%x", lpeek(sh, VirtualAddress))
+			mes strf("%x", offset)
+			// [DEBUG]
+			sdim icondata, lpeek(rde, Size)
+			dupptr icondata, varptr(section) + offset, lpeek(rde, Size), 2
+			bsave "ICON" + idlist(cnt) + ".ico", icondata
+		loop
+	return 0
+	
+	/*--------------------------------------------------
+		セクションを取得
+	--------------------------------------------------*/
+	#modcfunc load_section str section_cmp,\
+	                       local section_cur, local ret
+		sdim section_cur, 8	; セクション名
+		ret = -1			; 見つかったか
+		// IMAGE_SECTION_HEADERを読む
+		repeat wpeek(fh, NumberOfSections)
+			dupptr sh, varptr(oh) + IMAGE_OPTIONAL_HEADER + IMAGE_SECTION_HEADER*cnt, IMAGE_SECTION_HEADER, 2
+			memcpy section_cur, sh, 8, 0, 0
+			if section_cur == section_cmp {
+				ret = 0
+				break
+			}
+		loop
+		// 見つかったら読む
+		if ret == 0 {
+			dupptr section, varptr(byte) + lpeek(sh, PointerToRawData), lpeek(sh, SizeOfRawData), 2
+		}
+	return ret
+	
+	/*--------------------------------------------------
+		PEを開く
+	--------------------------------------------------*/
+	#modcfunc open_pe local dw
+		dim dw, 1
+		// ファイルを開く
+		fp = CreateFile(filepath, GENERIC_READ | GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0)
+		if fp == INVALID_HANDLE_VALUE : return -1
+		// ファイルサイズを取得
+		filesize = GetFileSize(fp, 0)
+		sdim byte, filesize
+		// ファイル内容を読む
+		ReadFile fp, byte, filesize, dw, 0
+		
+		// IMAGE_DOS_HEADERを読む
+		dupptr dos, varptr(byte), IMAGE_DOS_HEADER, 2
+		if wpeek(dos, e_magic) != IMAGE_DOS_SIGNATURE : return -2
+		
+		// IMAGE_NT_HEADERSのSigunatureを読む
+		dupptr dw, varptr(byte) + lpeek(dos, e_lfanew), 4, 4
+		if dw != IMAGE_NT_SIGNATURE : return -2
+		// IMAGE_FILE_HEADERを読む
+		dupptr fh, varptr(byte) + lpeek(dos, e_lfanew) + 4, IMAGE_FILE_HEADER, 2
+		// IMAGE_OPTIONAL_HEADERを読む
+		dupptr oh, varptr(fh) + IMAGE_FILE_HEADER, IMAGE_OPTIONAL_HEADER, 2
+		
+	return 0
+	
+#global
